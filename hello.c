@@ -1,18 +1,74 @@
 #include<linux/kernel.h>
 #include<linux/init.h>
 #include<linux/module.h>
-#include<linux/netpoll.h>
 
+#include<asm/uaccess.h>
+#include<linux/cdev.h>
+#include<linux/proc_fs.h>
 
+#define MAX_SIZE 100
+
+static char proc_buf[MAX_SIZE];
+static struct proc_dir_entry *proc_entry;
 
 MODULE_DESCRIPTION("My hello module");
-MODULE_AUTHOR("Miao");
+MODULE_AUTHOR("claude51315@gmail.com");
 MODULE_LICENSE("MIT");
 
 
+static int read_proc(char* buf, char **start,off_t offset, int count, int *eof, void *data)
+{
+    int len=0;
+    len = sprintf(buf,"%s\n", proc_buf);
+    return len;
+}
+static int write_proc(struct file *file, const char *buf, int count, void *data)
+{
+    if(count > MAX_SIZE)
+        count = MAX_SIZE;
+    if(copy_from_user(proc_buf, buf, count))
+        return -EFAULT;
+    return count;
+}
+
+
+static int init_proc(void)
+{
+    proc_entry=create_proc_entry("miao_proc", 0666, NULL);
+    if(!proc_entry) {
+        printk("Initial proc entry fail\n");
+        return -ENOMEM;
+    }
+    memset(proc_buf, '\0', sizeof(proc_buf));
+    proc_entry->read_proc = read_proc;
+    proc_entry->write_proc = write_proc;
+    printk("initial proc entry success!\n");
+    return 0;
+}
+
+
+static int init_qq(void)
+{
+    init_proc();
+    printk("hello kernel!\n");
+    return 0;
+}
+
+static void cleanup_qq(void)
+{
+    remove_proc_entry("maio_proc", NULL);
+    printk("exit kernel\n");
+}
+module_init(init_qq);
+module_exit(cleanup_qq);
+
+/*
+    issue: netpoll doesn't supported. 
+*/
+/*
+#include<linux/netpoll.h>
 static struct netpoll* np = NULL;
 static struct netpoll np_t;
-
 static void init_netpoll(void)
 {
     np_t.name= "Claude";
@@ -32,27 +88,9 @@ static void init_netpoll(void)
     np = &np_t;
     return;
 }
-
-
 void sendUdp(const char* buf)
 {
     int len = strlen(buf);
     netpoll_send_udp(np, buf, len);
 }
-
-static int init_qq(void)
-{
-    printk("hello kernel!\n");
-    init_netpoll();
-    sendUdp("HELLO!1\n");
-    sendUdp("HELLO!2\n");
-    sendUdp("HELLO!3\n");
-    return 0;
-}
-
-static void cleanup_qq(void)
-{
-    printk("exit kernel\n");
-}
-module_init(init_qq);
-module_exit(cleanup_qq);
+*/
