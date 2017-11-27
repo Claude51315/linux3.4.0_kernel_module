@@ -18,22 +18,100 @@
 MODULE_DESCRIPTION("My hello module");
 MODULE_AUTHOR("claude51315@gmail.com");
 
+#define DEBUG 1
 
+#define debug_print(fmt, ...) \
+    do {if(DEBUG) printk("%s:%d:%s" fmt, __FILE__, __LINE__, __FUNCTION__, __VA_ARGS__); \
+    }while(0)
+
+static int get_page_data(struct page *p, char *output)
+{
+    void *vpp = NULL;
+    vpp = kmap(p);
+    if(!vpp)
+        return -1;
+    memcpy(output, (char *)vpp, PAGE_SIZE);
+    kunmap(p);
+    vpp = NULL;
+    return 0;
+}
+
+static void get_filename(struct bio *print_bio, char *output)
+{
+    int i, j, k; 
+    struct bio_vec *biovec;
+    void *vpp;
+    struct page *bio_page;    
+    struct dentry *p;
+    unsigned char unknown[] = "unknown", null[]="NULL";
+    unsigned char *pname;
+    biovec = print_bio->bi_io_vec;
+    bio_page = biovec->bv_page;
+    pname = null;
+    vpp = NULL;
+    i = j = k = 0;
+    /* get filename */
+    if(bio_page && 
+            bio_page->mapping && 
+            ((unsigned long) bio_page->mapping & PAGE_MAPPING_ANON) == 0  && 
+            bio_page->mapping->host )
+    {
+        p = NULL ; 
+        if( !list_empty(&(bio_page->mapping->host->i_dentry)))
+            p = list_first_entry(&(bio_page->mapping->host->i_dentry), struct dentry, d_alias);
+        if(p != NULL ) {
+            pname = p->d_iname;
+            for(j = 0 ; j < strlen(p->d_iname); j++){
+                if( (p->d_iname[j]!= '\0')  &&  ( (p->d_iname[j] < 32) || (p->d_iname[j] > 126))){ 
+                    pname = unknown;
+                    break;
+                }
+            } 
+        }
+    }
+    if(pname != unknown &&  pname != null)
+    {
+        memcpy(output, pname, DNAME_INLINE_LEN);
+    }
+    if(pname == unknown)
+        memcpy(output, pname, 7 + 1);
+    if(pname == null)
+        memcpy(output, pname, 7 + 1);
+        
+    return;    
+}
 #define NETLINK_MYTRACE 30
 /* netlink interface */
 #define NETLINK_USER 31
 
 static struct sock *nl_sk = NULL;
-
+unsigned int user_pid; 
 static void nl_recv_msg(struct sk_buff *skb)
 {
     struct nlmsghdr *nlh;
     int pid, res;
     pid  = res = 0;
     nlh = (struct nlmsghdr*)skb->data;
+    user_pid = nlh->nlmsg_pid;
     printk("%s : msg = %s", __FUNCTION__, (char *)nlmsg_data(nlh));
-}
 
+}
+static void nl_send_msg(char *msg, int msg_len,int dstPID)
+{
+    struct sk_buff *skb;
+    struct nlmsghdr *nlh;
+    if(!msg || !nl_sk)
+        return;
+    skb = alloc_skb(NLMSG_SPACE(msg_len), GFP_KERNEL);
+    if(!skb) {
+        debug_print("%s\n", "allocate skb fail"); 
+    }
+    nlh = nlmsg_put(skb, 0, 0, 0, msg_len,0);
+    NETLINK_CB(skb).pid = NETLINK_CB(skb).dst_group = 0;
+    memcpy(NLMSG_DATA(nlh), msg, msg_len);
+    netlink_unicast(nl_sk, skb, dstPID, 1);
+    return ;
+}
 
 static int init_netlink(void)
 {
@@ -66,16 +144,32 @@ static int write_proc(struct file *file, const char *buf, unsigned long count, v
 /*
     jprobe function
 */
-
-static void my_end_io_probe(struct bio *bio, int error)
+static char* data_buf;
+static void my_end_io_probe(struct bio *bio, int flag)
 {
-    printk("HIIII, this called by probing!\n");
+    
+    char filename[DNAME_INLINE_LEN];
+    //struct page* bio_page;
+    char comment[50];
+    //bio_page = bio->bi_io_vec->bv_page; 
+    memset(filename, '\0', sizeof(filename));
+    memset(data_buf, 0, sizeof(data_buf));
+    memset(comment, '\0', sizeof(comment));
+    get_filename(bio, filename);
+    //get_page_data(bio_page, data_buf);
+    
+    
+    sprintf(comment, "%s&%llu\n", filename, bio->bi_sector);
+    //debug_print("%s\n", comment);
+    if(user_pid != 99999)
+        nl_send_msg(comment, strlen(comment), user_pid);
+    
     jprobe_return();
 }
 static struct jprobe my_probe = {
     .entry = my_end_io_probe,
     .kp = {
-        .symbol_name = "jprobe_end_io_t",
+        .symbol_name = "print_bio3",
         .addr = NULL,
     },
 
@@ -83,12 +177,17 @@ static struct jprobe my_probe = {
 static int init_jprobe(void)
 {
     int ret;
-
+    data_buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
+    if(!data_buf){
+        printk("%s:%d malloc memory fail\n", __FUNCTION__, __LINE__);
+   
+    }
     ret = register_jprobe(&my_probe);
     if(ret <0){
         printk("%s:%d jprobe fail\n", __FUNCTION__, __LINE__);
         return ret;
     }
+    printk("init jprobe success\n");
     return 0;
 }
 
@@ -112,18 +211,20 @@ static int init_proc(void)
 static int init_main(void)
 {
     printk("hello kernel!\n");
-    init_proc();
+
+    //init_proc();
     init_netlink();
     init_jprobe();
-    
+    user_pid = 99999;
     return 0;
 }
 
 static void cleanup_main(void)
 {
-    remove_proc_entry("maio_proc", NULL);
+    //remove_proc_entry("maio_proc", NULL);
     netlink_kernel_release(nl_sk);
-     unregister_jprobe(&my_probe);
+    unregister_jprobe(&my_probe);
+    kfree(data_buf);
     printk("exit kernel\n");
 }
 
