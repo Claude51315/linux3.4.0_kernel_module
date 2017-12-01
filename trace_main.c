@@ -1,29 +1,7 @@
-#include<linux/kernel.h>
-#include<linux/init.h>
-#include<linux/module.h>
+#include "common.h"
 
-#include<asm/uaccess.h>
-#include<linux/cdev.h>
-#include<linux/proc_fs.h>
-
-#define MAX_SIZE 100
-
-
-#include<net/sock.h>
-#include<linux/netlink.h>
-#include<linux/skbuff.h>
-#include<linux/bio.h>
-#include<linux/kprobes.h>
-
-#include<linux/time.h>
 MODULE_DESCRIPTION("My hello module");
 MODULE_AUTHOR("claude51315@gmail.com");
-
-#define DEBUG 1
-
-#define debug_print(fmt, ...) \
-    do {if(DEBUG) printk("%s:%d:%s" fmt, __FILE__, __LINE__, __FUNCTION__, __VA_ARGS__); \
-    }while(0)
 
 /* sha1*/
 #define SHA1CircularShift(bits,word) \
@@ -67,6 +45,7 @@ int SHA1Input(    SHA1Context    *context,
         unsigned       length);
 void compute_sha(unsigned char* input, int size, unsigned char* output);
 
+static struct timespec start_time;
 static int get_page_data(struct page *p, char *output)
 {
     void *vpp = NULL;
@@ -130,6 +109,7 @@ static void get_filename(struct bio *print_bio, char *output)
 
 static struct sock *nl_sk = NULL;
 unsigned int user_pid; 
+static int trace_flag;
 static void nl_recv_msg(struct sk_buff *skb)
 {
     struct nlmsghdr *nlh;
@@ -137,8 +117,13 @@ static void nl_recv_msg(struct sk_buff *skb)
     pid  = res = 0;
     nlh = (struct nlmsghdr*)skb->data;
     user_pid = nlh->nlmsg_pid;
-    printk("%s : msg = %s", __FUNCTION__, (char *)nlmsg_data(nlh));
-
+    printk("%s : msg = %s\n", __FUNCTION__, (char *)nlmsg_data(nlh));
+    if(strcmp((char*) nlmsg_data(nlh), "start") == 0) {
+        trace_flag = 1;
+        start_time = current_kernel_time();
+    } else {
+        trace_flag = 0;
+    }
 }
 static void nl_send_msg(char *msg, int msg_len,int dstPID)
 {
@@ -195,10 +180,32 @@ static void my_end_io_probe(struct bio *bio, int flag)
     char filename[DNAME_INLINE_LEN];
     struct page* bio_page;
     unsigned char comment[100];
+    char devname[20];
     unsigned char sha1[SHA1HashSize], sha1_hex[SHA1HashSize*2 + 1];
     int i;
     struct timespec timestamp;
+    
+    memset(devname, '\0', sizeof(devname));
+    bdevname(bio->bi_bdev, devname);    
+    /*
+    if(strcmp(devname, "mmcblk0p23") != 0){
+        jprobe_return();
+        return;
+    } 
+    */
+    if(!trace_flag){
+        jprobe_return();
+        return;
+    }
+        
     timestamp = current_kernel_time();
+    timestamp.tv_sec -= start_time.tv_sec;
+    timestamp.tv_nsec -= start_time.tv_nsec;
+    if(timestamp.tv_nsec < 0){
+        timestamp.tv_sec --;
+        timestamp.tv_nsec += 1000000000L;
+    }
+
     bio_page = bio->bi_io_vec->bv_page; 
     memset(filename, '\0', sizeof(filename));
     memset(data_buf, 0, sizeof(data_buf));
@@ -212,7 +219,7 @@ static void my_end_io_probe(struct bio *bio, int flag)
         sprintf(sha1_hex + i*2 , "%02x", sha1[i]);
     }
     sha1_hex[SHA1HashSize *2] = '\0';
-    sprintf(comment, "%5ld.%-10ld&%s&%llu&%s\n",timestamp.tv_sec, timestamp.tv_nsec,  filename, bio->bi_sector,sha1_hex);
+    sprintf(comment, "%5ld.%-10ld&%s&%s&%llu&%s\n",timestamp.tv_sec, timestamp.tv_nsec, devname, filename, bio->bi_sector,sha1_hex);
     if(user_pid != 99999){
         nl_send_msg(comment, strlen(comment), user_pid);
         nl_send_msg(data_buf, PAGE_SIZE, user_pid);
@@ -260,15 +267,23 @@ static int init_proc(void)
     return 0;
 }
 
-
+#define PAGE_COUNT 512
 static int init_main(void)
 {
+    char *ptr; 
     printk("hello kernel!\n");
-
+    trace_flag = 0;
     //init_proc();
     init_netlink();
     init_jprobe();
     user_pid = 99999;
+    ptr = kmalloc(PAGE_SIZE * PAGE_COUNT, GFP_KERNEL);
+    if(!ptr)
+        printk("alloc %d pages fail\n", PAGE_COUNT);
+    else
+        printk("alloc %d pages success\n", PAGE_COUNT);
+    
+    kfree(ptr);
     return 0;
 }
 
