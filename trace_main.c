@@ -1,54 +1,16 @@
 #include "common.h"
-
+#include "sha1.h"
+#include "crc.h"
+#include "adler.h"
 MODULE_DESCRIPTION("My hello module");
 MODULE_AUTHOR("claude51315@gmail.com");
-
-/* sha1*/
-#define SHA1CircularShift(bits,word) \
-    (((word) << (bits)) | ((word) >> (32-(bits))))
-
-#ifndef _SHA_enum_
-#define _SHA_enum_
-enum
-{
-    shaSuccess = 0,
-    shaNull,            /* Null pointer parameter */
-    shaInputTooLong,    /* input data too long */
-    shaStateError       /* called Input after Result */
-};
-#endif
-#define SHA1HashSize 20
-
-typedef struct SHA1Context
-{
-    unsigned int  Intermediate_Hash[SHA1HashSize/4]; /* Message Digest  */
-
-    unsigned int Length_Low;            /* Message length in bits      */
-    unsigned int Length_High;           /* Message length in bits      */
-
-    /* Index into message block array   */
-    unsigned int Message_Block_Index;
-    unsigned char Message_Block[64];      /* 512-bit message blocks      */
-
-    int Computed;               /* Is the digest computed?         */
-    int Corrupted;             /* Is the message digest corrupted? */
-} SHA1Context;
-
-void SHA1PadMessage(SHA1Context *);
-void SHA1ProcessMessageBlock(SHA1Context *);
-
-int SHA1Reset(SHA1Context *context);
-int SHA1Result( SHA1Context *context,
-        unsigned char Message_Digest[SHA1HashSize]);
-int SHA1Input(    SHA1Context    *context,
-        const unsigned char  *message_array,
-        unsigned       length);
-void compute_sha(unsigned char* input, int size, unsigned char* output);
 
 static struct timespec start_time;
 static int get_page_data(struct page *p, char *output)
 {
     void *vpp = NULL;
+    if(!p)
+        return -1;
     vpp = kmap(p);
     if(!vpp)
         return -1;
@@ -174,17 +136,23 @@ static int write_proc(struct file *file, const char *buf, unsigned long count, v
    jprobe function
  */
 static unsigned char* data_buf;
-static void my_end_io_probe(struct bio *bio, int flag)
+static void my_end_io_probe(int rw, struct bio *bio)
 {
 
     char filename[DNAME_INLINE_LEN];
     struct page* bio_page;
-    unsigned char comment[100];
+    unsigned char comment[200];
     char devname[20];
     unsigned char sha1[SHA1HashSize], sha1_hex[SHA1HashSize*2 + 1];
-    int i;
+    unsigned long crc32, adler;
+    int i, index, ret;
     struct timespec timestamp;
-    
+    if(!bio_has_data(bio) || (rw &( REQ_DISCARD | REQ_SANITIZE))) {
+        jprobe_return();
+        return;
+    }
+        
+
     memset(devname, '\0', sizeof(devname));
     bdevname(bio->bi_bdev, devname);    
     /*
@@ -197,7 +165,6 @@ static void my_end_io_probe(struct bio *bio, int flag)
         jprobe_return();
         return;
     }
-        
     timestamp = current_kernel_time();
     timestamp.tv_sec -= start_time.tv_sec;
     timestamp.tv_nsec -= start_time.tv_nsec;
@@ -208,28 +175,38 @@ static void my_end_io_probe(struct bio *bio, int flag)
 
     bio_page = bio->bi_io_vec->bv_page; 
     memset(filename, '\0', sizeof(filename));
-    memset(data_buf, 0, sizeof(data_buf));
+    memset(data_buf, 0, PAGE_SIZE);
     memset(sha1, '\0', sizeof(sha1));
     memset(sha1_hex, '\0', sizeof(sha1_hex));
     memset(comment, '&', sizeof(comment));
     get_filename(bio, filename);
-    get_page_data(bio_page, data_buf);
-    compute_sha(data_buf, PAGE_SIZE, sha1);
-    for( i = 0 ; i < SHA1HashSize; i++){
-        sprintf(sha1_hex + i*2 , "%02x", sha1[i]);
-    }
-    sha1_hex[SHA1HashSize *2] = '\0';
-    sprintf(comment, "%5ld.%-10ld&%s&%s&%llu&%s\n",timestamp.tv_sec, timestamp.tv_nsec, devname, filename, bio->bi_sector,sha1_hex);
-    if(user_pid != 99999){
-        nl_send_msg(comment, strlen(comment), user_pid);
-        nl_send_msg(data_buf, PAGE_SIZE, user_pid);
+    index= 0;
+    for(index = 0 ; index < bio -> bi_vcnt ; index ++) {
+        bio_page = (&bio->bi_io_vec[index])->bv_page;
+
+        ret = get_page_data(bio_page, data_buf);
+        
+        compute_sha(data_buf, PAGE_SIZE, sha1);
+        crc32 = crc32_hash(data_buf, PAGE_SIZE, 1); 
+        adler = adler_hash(data_buf, PAGE_SIZE);
+        for( i = 0 ; i < SHA1HashSize; i++){
+            sprintf(sha1_hex + i*2 , "%02x", sha1[i]);
+        }
+        sha1_hex[SHA1HashSize *2] = '\0';
+        //sprintf(comment, "%5ld.%-10ld&%s&%s&%llu&%s\n",timestamp.tv_sec, timestamp.tv_nsec, devname, filename, bio->bi_sector,sha1_hex);
+        sprintf(comment, "%5ld.%-10ld&%s&%s&%d&%c&%llu&%d&%s&%lu&%lu\n",timestamp.tv_sec, timestamp.tv_nsec, devname, filename, bio->bi_vcnt,(rw & WRITE) ? 'W' : 'R',   bio->bi_sector, index,sha1_hex, crc32, adler);
+        //printk("%d\n", strlen(comment));
+        if(user_pid != 99999){
+            nl_send_msg(comment, strlen(comment), user_pid);
+            //nl_send_msg(data_buf, PAGE_SIZE, user_pid);
+        }
     }
     jprobe_return();
 }
 static struct jprobe my_probe = {
     .entry = my_end_io_probe,
     .kp = {
-        .symbol_name = "print_bio3",
+        .symbol_name = "submit_bio",
         .addr = NULL,
     },
 
@@ -270,20 +247,12 @@ static int init_proc(void)
 #define PAGE_COUNT 512
 static int init_main(void)
 {
-    char *ptr; 
     printk("hello kernel!\n");
     trace_flag = 0;
     //init_proc();
     init_netlink();
     init_jprobe();
     user_pid = 99999;
-    ptr = kmalloc(PAGE_SIZE * PAGE_COUNT, GFP_KERNEL);
-    if(!ptr)
-        printk("alloc %d pages fail\n", PAGE_COUNT);
-    else
-        printk("alloc %d pages success\n", PAGE_COUNT);
-    
-    kfree(ptr);
     return 0;
 }
 
@@ -333,255 +302,4 @@ netpoll_send_udp(np, buf, len);
 }
  */
 
-int SHA1Reset(SHA1Context *context)
-{
-    if (!context)
-    {
-        return shaNull;
-    }
 
-    context->Length_Low             = 0;
-    context->Length_High            = 0;
-    context->Message_Block_Index    = 0;
-
-    context->Intermediate_Hash[0]   = 0x67452301;
-    context->Intermediate_Hash[1]   = 0xEFCDAB89;
-    context->Intermediate_Hash[2]   = 0x98BADCFE;
-    context->Intermediate_Hash[3]   = 0x10325476;
-    context->Intermediate_Hash[4]   = 0xC3D2E1F0;
-
-    context->Computed   = 0;
-    context->Corrupted  = 0;
-
-    return shaSuccess;
-}
-int SHA1Result( SHA1Context *context,
-        unsigned char Message_Digest[SHA1HashSize])
-{
-    int i;
-
-    if (!context || !Message_Digest)
-    {
-        return shaNull;
-    }
-
-    if (context->Corrupted)
-    {
-        return context->Corrupted;
-    }
-
-    if (!context->Computed)
-    {
-        SHA1PadMessage(context);
-        for(i=0; i<64; ++i)
-        {
-            /* message may be sensitive, clear it out */
-            context->Message_Block[i] = 0;
-        }
-        context->Length_Low = 0;    /* and clear length */
-        context->Length_High = 0;
-        context->Computed = 1;
-
-    }
-
-    for(i = 0; i < SHA1HashSize; ++i)
-    {
-        Message_Digest[i] = context->Intermediate_Hash[i>>2]
-            >> 8 * ( 3 - ( i & 0x03 ) );
-    }
-
-    return shaSuccess;
-}
-int SHA1Input(    SHA1Context    *context,
-        const unsigned char  *message_array,
-        unsigned       length)
-{
-    if (!length)
-    {
-        return shaSuccess;
-    }
-
-    if (!context || !message_array)
-    {
-        return shaNull;
-    }
-
-    if (context->Computed)
-    {
-        context->Corrupted = shaStateError;
-
-        return shaStateError;
-    }
-
-    if (context->Corrupted)
-    {
-        return context->Corrupted;
-    }
-    while(length-- && !context->Corrupted)
-    {
-        context->Message_Block[context->Message_Block_Index++] =
-            (*message_array & 0xFF);
-
-        context->Length_Low += 8;
-        if (context->Length_Low == 0)
-        {
-            context->Length_High++;
-            if (context->Length_High == 0)
-            {
-                /* Message is too long */
-                context->Corrupted = 1;
-            }
-        }
-
-        if (context->Message_Block_Index == 64)
-        {
-            SHA1ProcessMessageBlock(context);
-        }
-
-        message_array++;
-    }
-
-    return shaSuccess;
-}
-void SHA1ProcessMessageBlock(SHA1Context *context)
-{
-    const unsigned int K[] =    {       /* Constants defined in SHA-1   */
-        0x5A827999,
-        0x6ED9EBA1,
-        0x8F1BBCDC,
-        0xCA62C1D6
-    };
-    int           t;                 /* Loop counter                */
-    unsigned int      temp;              /* Temporary word value        */
-    unsigned int       W[80];             /* Word sequence               */
-    unsigned int       A, B, C, D, E;     /* Word buffers                */
-
-    /*
-     *  Initialize the first 16 words in the array W
-     */
-    for(t = 0; t < 16; t++)
-    {
-        W[t] = context->Message_Block[t * 4] << 24;
-        W[t] |= context->Message_Block[t * 4 + 1] << 16;
-        W[t] |= context->Message_Block[t * 4 + 2] << 8;
-        W[t] |= context->Message_Block[t * 4 + 3];
-    }
-
-    for(t = 16; t < 80; t++)
-    {
-        W[t] = SHA1CircularShift(1,W[t-3] ^ W[t-8] ^ W[t-14] ^ W[t-16]);
-    }
-
-    A = context->Intermediate_Hash[0];
-    B = context->Intermediate_Hash[1];
-    C = context->Intermediate_Hash[2];
-    D = context->Intermediate_Hash[3];
-    E = context->Intermediate_Hash[4];
-
-    for(t = 0; t < 20; t++)
-    {
-        temp =  SHA1CircularShift(5,A) +
-            ((B & C) | ((~B) & D)) + E + W[t] + K[0];
-        E = D;
-        D = C;
-        C = SHA1CircularShift(30,B);
-
-        B = A;
-        A = temp;
-    }
-
-    for(t = 20; t < 40; t++)
-    {
-        temp = SHA1CircularShift(5,A) + (B ^ C ^ D) + E + W[t] + K[1];
-        E = D;
-        D = C;
-        C = SHA1CircularShift(30,B);
-        B = A;
-        A = temp;
-    }
-
-    for(t = 40; t < 60; t++)
-    {
-        temp = SHA1CircularShift(5,A) +
-            ((B & C) | (B & D) | (C & D)) + E + W[t] + K[2];
-        E = D;
-        D = C;
-        C = SHA1CircularShift(30,B);
-        B = A;
-        A = temp;
-    }
-
-    for(t = 60; t < 80; t++)
-    {
-        temp = SHA1CircularShift(5,A) + (B ^ C ^ D) + E + W[t] + K[3];
-        E = D;
-        D = C;
-        C = SHA1CircularShift(30,B);
-        B = A;
-        A = temp;
-    }
-
-    context->Intermediate_Hash[0] += A;
-    context->Intermediate_Hash[1] += B;
-    context->Intermediate_Hash[2] += C;
-    context->Intermediate_Hash[3] += D;
-    context->Intermediate_Hash[4] += E;
-
-    context->Message_Block_Index = 0;
-}
-void SHA1PadMessage(SHA1Context *context)
-{
-    /*
-     *  Check to see if the current message block is too small to hold
-     *  the initial padding bits and length.  If so, we will pad the
-     *  block, process it, and then continue padding into a second
-     *  block.
-     */
-    if (context->Message_Block_Index > 55)
-    {
-        context->Message_Block[context->Message_Block_Index++] = 0x80;
-        while(context->Message_Block_Index < 64)
-        {
-            context->Message_Block[context->Message_Block_Index++] = 0;
-        }
-
-        SHA1ProcessMessageBlock(context);
-
-        while(context->Message_Block_Index < 56)
-        {
-            context->Message_Block[context->Message_Block_Index++] = 0;
-        }
-    }
-    else
-    {
-        context->Message_Block[context->Message_Block_Index++] = 0x80;
-        while(context->Message_Block_Index < 56)
-        {
-
-            context->Message_Block[context->Message_Block_Index++] = 0;
-        }
-    }
-
-    /*
-     *  Store the message length as the last 8 octets
-     */
-    context->Message_Block[56] = context->Length_High >> 24;
-    context->Message_Block[57] = context->Length_High >> 16;
-    context->Message_Block[58] = context->Length_High >> 8;
-    context->Message_Block[59] = context->Length_High;
-    context->Message_Block[60] = context->Length_Low >> 24;
-    context->Message_Block[61] = context->Length_Low >> 16;
-    context->Message_Block[62] = context->Length_Low >> 8;
-    context->Message_Block[63] = context->Length_Low;
-
-    SHA1ProcessMessageBlock(context);
-}
-
-void compute_sha(unsigned char* input, int size, unsigned char* output)
-{
-
-    SHA1Context sha;
-    SHA1Reset(&sha);
-    SHA1Input(&sha, input, size);    
-    SHA1Result(&sha, output);
-}
