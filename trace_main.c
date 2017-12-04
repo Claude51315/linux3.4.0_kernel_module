@@ -2,10 +2,20 @@
 #include "sha1.h"
 #include "crc.h"
 #include "adler.h"
+#include "lruc.h"
 MODULE_DESCRIPTION("My hello module");
 MODULE_AUTHOR("claude51315@gmail.com");
 
 static struct timespec start_time;
+
+static lruc *lru_cache;
+typedef struct {
+    unsigned char buffer[PAGE_SIZE];
+}page_buf;
+
+static page_buf *cache_memory;
+
+#define CACHE_SIZE 512
 static int get_page_data(struct page *p, char *output)
 {
     void *vpp = NULL;
@@ -135,36 +145,57 @@ static int write_proc(struct file *file, const char *buf, unsigned long count, v
 /*
    jprobe function
  */
+static void check_cache(char* data, uint32_t sector) 
+{
+    
+    uint32_t hash_index;
+    hash_index = lruc_hash(lru_cache, sector, sizeof(sector));
+    //if(lruc_find(lru_cache, sector, sizeof(sector)))
+    //{
+        diff_4KB(sector, data, (unsigned char*)(cache_memory + hash_index));
+        memcpy((char *)(cache_memory + hash_index), data, PAGE_SIZE);
+    //}
+    //lruc_set(lru_cache, sector, sizeof(sector), (void*)(cache_memory + hash_index), PAGE_SIZE);
+
+}
+
 static unsigned char* data_buf;
 static void my_end_io_probe(int rw, struct bio *bio)
 {
 
+    // variable for printing
+    struct timespec timestamp;
     char filename[DNAME_INLINE_LEN];
-    struct page* bio_page;
     unsigned char comment[200];
     char devname[20];
     unsigned char sha1[SHA1HashSize], sha1_hex[SHA1HashSize*2 + 1];
     unsigned long crc32, adler;
+
+    // variable for lru cache
+    uint32_t sector;
+    // common usage
     int i, index, ret;
-    struct timespec timestamp;
+    struct page* bio_page;
     if(!bio_has_data(bio) || (rw &( REQ_DISCARD | REQ_SANITIZE))) {
         jprobe_return();
         return;
     }
-        
+
 
     memset(devname, '\0', sizeof(devname));
     bdevname(bio->bi_bdev, devname);    
     /*
-    if(strcmp(devname, "mmcblk0p23") != 0){
-        jprobe_return();
-        return;
-    } 
-    */
+       if(strcmp(devname, "mmcblk0p23") != 0){
+       jprobe_return();
+       return;
+       } 
+     */
+    /*
     if(!trace_flag){
         jprobe_return();
         return;
     }
+    */
     timestamp = current_kernel_time();
     timestamp.tv_sec -= start_time.tv_sec;
     timestamp.tv_nsec -= start_time.tv_nsec;
@@ -172,7 +203,6 @@ static void my_end_io_probe(int rw, struct bio *bio)
         timestamp.tv_sec --;
         timestamp.tv_nsec += 1000000000L;
     }
-
     bio_page = bio->bi_io_vec->bv_page; 
     memset(filename, '\0', sizeof(filename));
     memset(data_buf, 0, PAGE_SIZE);
@@ -181,11 +211,17 @@ static void my_end_io_probe(int rw, struct bio *bio)
     memset(comment, '&', sizeof(comment));
     get_filename(bio, filename);
     index= 0;
+    sector = 0;
     for(index = 0 ; index < bio -> bi_vcnt ; index ++) {
-        bio_page = (&bio->bi_io_vec[index])->bv_page;
 
+        sector = bio->bi_sector + index * 8;
+        bio_page = (&bio->bi_io_vec[index])->bv_page;
         ret = get_page_data(bio_page, data_buf);
-        
+        if(ret < 0 ) {
+            debug_print("%s\n", "get page data fail" );
+            continue;
+        }
+        check_cache(data_buf, sector);
         compute_sha(data_buf, PAGE_SIZE, sha1);
         crc32 = crc32_hash(data_buf, PAGE_SIZE, 1); 
         adler = adler_hash(data_buf, PAGE_SIZE);
@@ -197,7 +233,7 @@ static void my_end_io_probe(int rw, struct bio *bio)
         sprintf(comment, "%5ld.%-10ld&%s&%s&%d&%c&%llu&%d&%s&%lu&%lu\n",timestamp.tv_sec, timestamp.tv_nsec, devname, filename, bio->bi_vcnt,(rw & WRITE) ? 'W' : 'R',   bio->bi_sector, index,sha1_hex, crc32, adler);
         //printk("%d\n", strlen(comment));
         if(user_pid != 99999){
-            nl_send_msg(comment, strlen(comment), user_pid);
+            //nl_send_msg(comment, strlen(comment), user_pid);
             //nl_send_msg(data_buf, PAGE_SIZE, user_pid);
         }
     }
@@ -216,8 +252,7 @@ static int init_jprobe(void)
     int ret;
     data_buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
     if(!data_buf){
-        printk("%s:%d malloc memory fail\n", __FUNCTION__, __LINE__);
-
+        printk("%s:%d malloc jprobe memory fail\n", __FUNCTION__, __LINE__);
     }
     ret = register_jprobe(&my_probe);
     if(ret <0){
@@ -227,6 +262,7 @@ static int init_jprobe(void)
     printk("init jprobe success\n");
     return 0;
 }
+
 
 static int init_proc(void)
 {
@@ -244,7 +280,6 @@ static int init_proc(void)
     return 0;
 }
 
-#define PAGE_COUNT 512
 static int init_main(void)
 {
     printk("hello kernel!\n");
@@ -252,7 +287,12 @@ static int init_main(void)
     //init_proc();
     init_netlink();
     init_jprobe();
+    lru_cache = lruc_new(CACHE_SIZE); 
+    cache_memory = kmalloc(CACHE_SIZE * sizeof(page_buf), GFP_KERNEL);
+    if(!cache_memory)
+        debug_print("%s\n", "not enough memory for cache");
     user_pid = 99999;
+    printk("init done!\n");
     return 0;
 }
 
@@ -261,7 +301,9 @@ static void cleanup_main(void)
     //remove_proc_entry("maio_proc", NULL);
     unregister_jprobe(&my_probe);
     netlink_kernel_release(nl_sk);
+    lruc_free(lru_cache);
     kfree(data_buf);
+    kfree(cache_memory);
     printk("exit kernel\n");
 }
 

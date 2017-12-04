@@ -1,7 +1,7 @@
 KERNEL_DIR=/home/esslab/android/msm
 obj-m := trace.o
 
-trace-objs := trace_main.o sha1.o crc.o adler.o
+trace-objs := trace_main.o sha1.o crc.o adler.o lruc.o common.o
 
 PWD := $(shell pwd)
 
