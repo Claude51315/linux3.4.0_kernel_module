@@ -19,7 +19,7 @@
 #include<linux/time.h>
 
 #include<linux/mutex.h>
-
+#include<linux/lzo.h>
 
 #ifndef COMMON_H
 #define COMMON_H
@@ -30,4 +30,6 @@
     }while(0)
 
 int diff_4KB(uint32_t sector, unsigned char* a, unsigned char* b);
+int lzo_compress(char *data, int len, unsigned char* wrkmem, unsigned char* dst_buf);
+
 #endif

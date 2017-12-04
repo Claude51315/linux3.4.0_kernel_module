@@ -15,6 +15,9 @@ typedef struct {
 
 static page_buf *cache_memory;
 
+static unsigned char* lzo_wrkmem;
+static unsigned char* lzo_dstbuf;
+
 #define CACHE_SIZE 512
 static int get_page_data(struct page *p, char *output)
 {
@@ -170,7 +173,7 @@ static void my_end_io_probe(int rw, struct bio *bio)
     char devname[20];
     unsigned char sha1[SHA1HashSize], sha1_hex[SHA1HashSize*2 + 1];
     unsigned long crc32, adler;
-
+    int lzo;
     // variable for lru cache
     uint32_t sector;
     // common usage
@@ -210,10 +213,15 @@ static void my_end_io_probe(int rw, struct bio *bio)
     memset(sha1_hex, '\0', sizeof(sha1_hex));
     memset(comment, '&', sizeof(comment));
     get_filename(bio, filename);
+    if(strncmp(filename, "trace", 5) == 0) {
+        jprobe_return();
+        return;
+    }
+    
     index= 0;
     sector = 0;
     for(index = 0 ; index < bio -> bi_vcnt ; index ++) {
-
+        lzo = -1;
         sector = bio->bi_sector + index * 8;
         bio_page = (&bio->bi_io_vec[index])->bv_page;
         ret = get_page_data(bio_page, data_buf);
@@ -221,17 +229,18 @@ static void my_end_io_probe(int rw, struct bio *bio)
             debug_print("%s\n", "get page data fail" );
             continue;
         }
-        check_cache(data_buf, sector);
+        //check_cache(data_buf, sector);
         compute_sha(data_buf, PAGE_SIZE, sha1);
         crc32 = crc32_hash(data_buf, PAGE_SIZE, 1); 
         adler = adler_hash(data_buf, PAGE_SIZE);
+        lzo = lzo_compress(data_buf, PAGE_SIZE, lzo_wrkmem, lzo_dstbuf);
         for( i = 0 ; i < SHA1HashSize; i++){
             sprintf(sha1_hex + i*2 , "%02x", sha1[i]);
         }
         sha1_hex[SHA1HashSize *2] = '\0';
         //sprintf(comment, "%5ld.%-10ld&%s&%s&%llu&%s\n",timestamp.tv_sec, timestamp.tv_nsec, devname, filename, bio->bi_sector,sha1_hex);
-        sprintf(comment, "%5ld.%-10ld&%s&%s&%d&%c&%llu&%d&%s&%lu&%lu\n",timestamp.tv_sec, timestamp.tv_nsec, devname, filename, bio->bi_vcnt,(rw & WRITE) ? 'W' : 'R',   bio->bi_sector, index,sha1_hex, crc32, adler);
-        //printk("%d\n", strlen(comment));
+        sprintf(comment, "%5ld.%-10ld&%s&%s&%d&%c&%llu&%d&%s&%lu&%lu&%d\n",timestamp.tv_sec, timestamp.tv_nsec, devname, filename, bio->bi_vcnt,(rw & WRITE) ? 'W' : 'R',   bio->bi_sector, index,sha1_hex, crc32, adler, lzo);
+        printk("%s", (comment));
         if(user_pid != 99999){
             //nl_send_msg(comment, strlen(comment), user_pid);
             //nl_send_msg(data_buf, PAGE_SIZE, user_pid);
@@ -291,6 +300,9 @@ static int init_main(void)
     cache_memory = kmalloc(CACHE_SIZE * sizeof(page_buf), GFP_KERNEL);
     if(!cache_memory)
         debug_print("%s\n", "not enough memory for cache");
+    lzo_wrkmem = kmalloc(LZO1X_MEM_COMPRESS, GFP_KERNEL);
+    lzo_dstbuf = kmalloc(lzo1x_worst_compress(PAGE_SIZE), GFP_KERNEL);
+    
     user_pid = 99999;
     printk("init done!\n");
     return 0;
@@ -304,6 +316,8 @@ static void cleanup_main(void)
     lruc_free(lru_cache);
     kfree(data_buf);
     kfree(cache_memory);
+    kfree(lzo_wrkmem);
+    kfree(lzo_dstbuf);
     printk("exit kernel\n");
 }
 
