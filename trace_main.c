@@ -148,18 +148,17 @@ static int write_proc(struct file *file, const char *buf, unsigned long count, v
 /*
    jprobe function
  */
-static void check_cache(char* data, uint32_t sector) 
+static void check_cache(int key, char* data, uint32_t sector) 
 {
     
     uint32_t hash_index;
     hash_index = lruc_hash(lru_cache, sector, sizeof(sector));
     //if(lruc_find(lru_cache, sector, sizeof(sector)))
     //{
-        diff_4KB(sector, data, (unsigned char*)(cache_memory + hash_index));
+        diff_4KB(key, sector, data, (unsigned char*)(cache_memory + hash_index));
         memcpy((char *)(cache_memory + hash_index), data, PAGE_SIZE);
     //}
     //lruc_set(lru_cache, sector, sizeof(sector), (void*)(cache_memory + hash_index), PAGE_SIZE);
-
 }
 
 static unsigned char* data_buf;
@@ -174,6 +173,7 @@ static void my_end_io_probe(int rw, struct bio *bio)
     unsigned char sha1[SHA1HashSize], sha1_hex[SHA1HashSize*2 + 1];
     unsigned long crc32, adler;
     int lzo;
+    static int key = 0;
     // variable for lru cache
     uint32_t sector;
     // common usage
@@ -229,7 +229,7 @@ static void my_end_io_probe(int rw, struct bio *bio)
             debug_print("%s\n", "get page data fail" );
             continue;
         }
-        //check_cache(data_buf, sector);
+        check_cache(key, data_buf, sector);
         compute_sha(data_buf, PAGE_SIZE, sha1);
         crc32 = crc32_hash(data_buf, PAGE_SIZE, 1); 
         adler = adler_hash(data_buf, PAGE_SIZE);
@@ -239,12 +239,14 @@ static void my_end_io_probe(int rw, struct bio *bio)
         }
         sha1_hex[SHA1HashSize *2] = '\0';
         //sprintf(comment, "%5ld.%-10ld&%s&%s&%llu&%s\n",timestamp.tv_sec, timestamp.tv_nsec, devname, filename, bio->bi_sector,sha1_hex);
-        sprintf(comment, "%5ld.%-10ld&%s&%s&%d&%c&%llu&%d&%s&%lu&%lu&%d\n",timestamp.tv_sec, timestamp.tv_nsec, devname, filename, bio->bi_vcnt,(rw & WRITE) ? 'W' : 'R',   bio->bi_sector, index,sha1_hex, crc32, adler, lzo);
+        //sprintf(comment, "%5ld.%-10ld&%s&%s&%d&%c&%llu&%d&%s&%lu&%lu&%d\n",timestamp.tv_sec, timestamp.tv_nsec, devname, filename, bio->bi_vcnt,(rw & WRITE) ? 'W' : 'R',   bio->bi_sector, index,sha1_hex, crc32, adler, lzo);
+        sprintf(comment, "qwert&%5ld.%-10ld&%d&%s&%s&%d&%c&%llu&%d&%s&%lu&%lu&%d\n", timestamp.tv_sec, timestamp.tv_nsec, key, devname, filename, bio->bi_vcnt,(rw & WRITE) ? 'W' : 'R',   bio->bi_sector, index,sha1_hex, crc32, adler, lzo);
         printk("%s", (comment));
         if(user_pid != 99999){
             //nl_send_msg(comment, strlen(comment), user_pid);
             //nl_send_msg(data_buf, PAGE_SIZE, user_pid);
         }
+        key++;
     }
     jprobe_return();
 }
@@ -303,6 +305,7 @@ static int init_main(void)
     lzo_wrkmem = kmalloc(LZO1X_MEM_COMPRESS, GFP_KERNEL);
     lzo_dstbuf = kmalloc(lzo1x_worst_compress(PAGE_SIZE), GFP_KERNEL);
     
+   start_time = current_kernel_time();
     user_pid = 99999;
     printk("init done!\n");
     return 0;

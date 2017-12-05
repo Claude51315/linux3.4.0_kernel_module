@@ -1,21 +1,27 @@
 #include "common.h"
 
 
-int diff_4KB(uint32_t sector, unsigned char* a, unsigned char* b)
+int diff_4KB(int key, uint32_t sector, unsigned char* a, unsigned char* b)
 {
 
 
-    unsigned char *p1, *p2;
+    uint32_t *p1, *p2;
     uint32_t tmp;
     int start, length;
-
+    char comment[500];
+    char log[20];
     int i;
-    p1 = a;
-    p2 = b;
+    int offset, log_length;
+    p1 =(uint32_t*) a;
+    p2 =(uint32_t*) b;
+
+
+    memset(comment, '\0', sizeof(comment));
+    offset = sprintf(comment, "%d&%u", key, sector);
     start = length = 0;
-    for(i = 0 ; i < (PAGE_SIZE); i++) {
+    for(i = 0 ; i < (PAGE_SIZE/4); i++) {
         tmp = (*p1 ^ *p2);
-        if(tmp == 0) { // same
+        if(tmp != 0) { // diff
             if( length == 0 ) {
                 start = i;
                 length = 1;
@@ -23,8 +29,19 @@ int diff_4KB(uint32_t sector, unsigned char* a, unsigned char* b)
                 length++;
             }
         } else {
-            if(length > 1)
-                debug_print(" %u&%d&%d\n", sector, start, length);
+            if(length > 0)
+            {
+                memset(log, '\0', sizeof(log));
+                sprintf(log, "&%d#%d&", start, length);
+                log_length = strlen(log);
+                if(log_length + offset >= sizeof(comment)) {
+                    printk("asdfg&%s\n", comment);
+                    memset(comment, '\0', sizeof(comment));
+                    offset = sprintf(comment, "%d&%u", key, sector);
+                }
+                sprintf(comment + offset, "%s", log);
+                offset += log_length;
+            }
             length = 0;
         }
         p1++;
